@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+const { useState, useMemo } = React;
 
 /* ============================================================================
  *  ΜΗΧΑΝΗ ΥΠΟΛΟΓΙΣΜΟΥ (ενσωματωμένη — επαληθευμένη στο παράδειγμα ΥΠΕΘΟ)
@@ -114,7 +114,7 @@ function buildOverpayment(c, correct) {
     const correctInst = correctPaying[i].installment;
     const monthly = round2(actual - correctInst);
     cumulative = round2(cumulative + monthly);
-    out.push({ monthNo: correctPaying[i].monthNo, date: c.actualPayments[i].date, actual, correct: correctInst, monthlyOverpayment: monthly, cumulativeOverpayment: cumulative });
+    out.push({ monthNo: correctPaying[i].monthNo, date: c.actualPayments[i].date, actual, correct: correctInst, monthlyOverpayment: monthly, cumulativeOverpayment: cumulative, empty: !!c.actualPayments[i].empty });
   }
   return out;
 }
@@ -188,7 +188,7 @@ const inputStyle = {
  *  ΕΦΑΡΜΟΓΗ
  * ========================================================================== */
 
-export default function App() {
+function App() {
   const [reference, setReference] = useState("");
   const [framework, setFramework] = useState("n3869_2010");
   const [primaryRes, setPrimaryRes] = useState(true);
@@ -203,9 +203,12 @@ export default function App() {
   const [tiers, setTiers] = useState([{ months: 300, installment: 483, label: "κανονική" }]);
   const [accrual, setAccrual] = useState("perInstallment30d");
 
-  // πραγματικές καταβολές: απλό μοντέλο — n δόσεις ποσού x από την έναρξη
-  const [payCount, setPayCount] = useState(30);
-  const [payAmount, setPayAmount] = useState(731);
+  // πραγματικές καταβολές: μπλοκ που επεκτείνονται σε χρονοσειρά.
+  // kind: 'same' = n δόσεις ίδιου ποσού | 'empty' = n κενές (μηδενικές) |
+  //       'single' = μία δόση συγκεκριμένου ποσού.
+  const [payBlocks, setPayBlocks] = useState([
+    { id: 1, kind: "same", count: 30, amount: 731 },
+  ]);
 
   const [ran, setRan] = useState(false);
 
@@ -216,12 +219,26 @@ export default function App() {
     [framework, primaryRes, active, consistent]
   );
 
+  // επέκταση μπλοκ → επίπεδη λίστα ποσών (με flag για κενές δόσεις)
+  const expandedPayments = useMemo(() => {
+    const flat = [];
+    for (const b of payBlocks) {
+      if (b.kind === "single") {
+        flat.push({ amount: Number(b.amount) || 0, empty: false });
+      } else if (b.kind === "empty") {
+        for (let i = 0; i < (Number(b.count) || 0); i++) flat.push({ amount: 0, empty: true });
+      } else {
+        for (let i = 0; i < (Number(b.count) || 0); i++) flat.push({ amount: Number(b.amount) || 0, empty: false });
+      }
+    }
+    return flat;
+  }, [payBlocks]);
+
   const result = useMemo(() => {
     if (!ran || !eligibility.eligible || totalMonths === 0) return null;
-    const payments = [];
-    for (let i = 0; i < Number(payCount); i++) {
-      payments.push({ date: addMonths(start, i), amount: Number(payAmount) });
-    }
+    const payments = expandedPayments.map((p, i) => ({
+      date: addMonths(start, i), amount: p.amount, empty: p.empty,
+    }));
     const c = {
       id: "case", reference,
       eligibility: { framework, isPrimaryResidenceProtection: primaryRes, isActiveSettlement: active, isDebtorConsistent: consistent },
@@ -231,11 +248,29 @@ export default function App() {
       actualPayments: payments, rulingDate: "2026-06-05",
     };
     return runAudit(c, { interestAccrual: accrual });
-  }, [ran, eligibility.eligible, totalMonths, reference, principal, start, rateType, fixedRate, tiers, accrual, payCount, payAmount, framework, primaryRes, active, consistent]);
+  }, [ran, eligibility.eligible, totalMonths, reference, principal, start, rateType, fixedRate, tiers, accrual, expandedPayments, framework, primaryRes, active, consistent]);
 
   const updateTier = (i, key, val) => setTiers((ts) => ts.map((t, j) => (j === i ? { ...t, [key]: val } : t)));
   const addTier = () => setTiers((ts) => [...ts, { months: 12, installment: 0, label: "" }]);
   const removeTier = (i) => setTiers((ts) => ts.filter((_, j) => j !== i));
+
+  const nextId = () => (payBlocks.reduce((m, b) => Math.max(m, b.id), 0) + 1);
+  const updateBlock = (id, key, val) => setPayBlocks((bs) => bs.map((b) => (b.id === id ? { ...b, [key]: val } : b)));
+  const addBlock = (kind) => setPayBlocks((bs) => [...bs, kind === "single"
+    ? { id: nextId(), kind: "single", amount: 0 }
+    : kind === "empty"
+    ? { id: nextId(), kind: "empty", count: 1 }
+    : { id: nextId(), kind: "same", count: 1, amount: 0 }]);
+  const removeBlock = (id) => setPayBlocks((bs) => bs.filter((b) => b.id !== id));
+  const moveBlock = (id, dir) => setPayBlocks((bs) => {
+    const i = bs.findIndex((b) => b.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= bs.length) return bs;
+    const copy = [...bs];
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+    return copy;
+  });
+  const totalPaymentsCount = expandedPayments.length;
 
   return (
     <div style={{ minHeight: "100vh", background: C.paper, color: C.ink, fontFamily: "'Inter', -apple-system, system-ui, sans-serif", lineHeight: 1.5 }}>
@@ -325,13 +360,20 @@ export default function App() {
             <button onClick={addTier} style={{ border: `1px dashed ${C.petrolLight}`, background: "transparent", color: C.petrol, borderRadius: 2, padding: "7px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 16, width: "100%" }}>+ Προσθήκη σκαλοπατιού</button>
 
             <SectionLabel n="5" title="Πραγματικές καταβολές" />
-            <div className="grid2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <Field label="Πλήθος δόσεων">
-                <input type="number" style={inputStyle} value={payCount} onChange={(e) => setPayCount(e.target.value)} />
-              </Field>
-              <Field label="Ποσό ανά δόση (€)">
-                <input type="number" style={inputStyle} value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
-              </Field>
+            <div style={{ fontSize: 11.5, color: C.mute, marginBottom: 10, lineHeight: 1.45 }}>
+              Πρόσθεσε μπλοκ με τη σειρά που εμφανίζονται στην καρτέλα του servicer. Σύνολο: <strong className="num">{totalPaymentsCount}</strong> καταβολές.
+            </div>
+            {payBlocks.map((b, idx) => (
+              <PaymentBlock
+                key={b.id} block={b} index={idx} total={payBlocks.length}
+                onUpdate={updateBlock} onRemove={removeBlock} onMove={moveBlock}
+                canRemove={payBlocks.length > 1}
+              />
+            ))}
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+              <AddBtn onClick={() => addBlock("same")}>+ Ίδιες δόσεις</AddBtn>
+              <AddBtn onClick={() => addBlock("single")}>+ Μεμονωμένη</AddBtn>
+              <AddBtn onClick={() => addBlock("empty")}>+ Κενές</AddBtn>
             </div>
 
             <Field label="Μέθοδος τόκου (νέα)" hint="Το ευνοϊκό σενάριο ΥΠΕΘΟ υπολογίζει τόκο μόνο για 30 ημέρες κάθε δόσης.">
@@ -379,6 +421,66 @@ function Check({ label, checked, onChange }) {
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} style={{ marginTop: 2, width: 16, height: 16, accentColor: C.petrol }} />
       <span>{label}</span>
     </label>
+  );
+}
+
+function AddBtn({ onClick, children }) {
+  return (
+    <button onClick={onClick} style={{ flex: "1 1 auto", border: `1px dashed ${C.petrolLight}`, background: "transparent", color: C.petrol, borderRadius: 2, padding: "7px 8px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
+      {children}
+    </button>
+  );
+}
+
+const KIND_META = {
+  same: { tag: "Ίδιες", color: C.petrol },
+  single: { tag: "Μεμονωμένη", color: C.amber },
+  empty: { tag: "Κενές", color: C.red },
+};
+
+function PaymentBlock({ block, index, total, onUpdate, onRemove, onMove, canRemove }) {
+  const meta = KIND_META[block.kind];
+  const miniInput = { ...inputStyle, padding: "6px 8px", fontSize: 13 };
+  return (
+    <div style={{ border: `1px solid ${C.line}`, borderLeft: `3px solid ${meta.color}`, borderRadius: 2, padding: "9px 10px", marginBottom: 7, background: C.paper }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 7 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: meta.color }}>
+          #{index + 1} · {meta.tag}
+        </span>
+        <span style={{ display: "flex", gap: 3 }}>
+          <IconBtn disabled={index === 0} onClick={() => onMove(block.id, -1)} title="Πάνω">↑</IconBtn>
+          <IconBtn disabled={index === total - 1} onClick={() => onMove(block.id, 1)} title="Κάτω">↓</IconBtn>
+          <IconBtn disabled={!canRemove} onClick={() => onRemove(block.id)} title="Διαγραφή">×</IconBtn>
+        </span>
+      </div>
+      {block.kind === "single" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12.5, color: C.mute, whiteSpace: "nowrap" }}>Ποσό €</span>
+          <input type="number" style={miniInput} value={block.amount} onChange={(e) => onUpdate(block.id, "amount", e.target.value)} />
+        </div>
+      ) : block.kind === "empty" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input type="number" style={{ ...miniInput, width: 80, flex: "0 0 80px" }} value={block.count} onChange={(e) => onUpdate(block.id, "count", e.target.value)} />
+          <span style={{ fontSize: 12.5, color: C.mute }}>μήνες χωρίς καταβολή (0 €)</span>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input type="number" style={{ ...miniInput, width: 64, flex: "0 0 64px" }} value={block.count} onChange={(e) => onUpdate(block.id, "count", e.target.value)} />
+          <span style={{ fontSize: 12.5, color: C.mute, whiteSpace: "nowrap" }}>δόσεις ×</span>
+          <input type="number" style={miniInput} value={block.amount} onChange={(e) => onUpdate(block.id, "amount", e.target.value)} />
+          <span style={{ fontSize: 12.5, color: C.mute }}>€</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IconBtn({ children, onClick, disabled, title }) {
+  return (
+    <button onClick={onClick} disabled={disabled} title={title}
+      style={{ width: 24, height: 24, border: `1px solid ${C.line}`, background: disabled ? C.paperDark : "#fff", color: disabled ? C.line : C.mute, borderRadius: 2, cursor: disabled ? "not-allowed" : "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>
+      {children}
+    </button>
   );
 }
 
@@ -440,9 +542,10 @@ function Results({ result, reference, accrual }) {
               </thead>
               <tbody>
                 {overpaymentBreakdown.slice(0, 60).map((r, i) => (
-                  <tr key={i} style={{ borderBottom: `1px solid ${C.paperDark}` }}>
+                  <tr key={i} style={{ borderBottom: `1px solid ${C.paperDark}`, background: r.empty ? "rgba(138,47,47,0.04)" : "transparent" }}>
                     <Td>{r.monthNo}</Td><Td>{r.date}</Td>
-                    <Td right>{eur(r.actual)}</Td><Td right>{eur(r.correct)}</Td>
+                    <Td right>{r.empty ? <span style={{ color: C.red, fontSize: 11.5, fontStyle: "italic" }}>κενή</span> : eur(r.actual)}</Td>
+                    <Td right>{eur(r.correct)}</Td>
                     <Td right tone={r.monthlyOverpayment > 0 ? C.red : C.green}>{eur(r.monthlyOverpayment)}</Td>
                     <Td right bold>{eur(r.cumulativeOverpayment)}</Td>
                   </tr>
@@ -559,3 +662,7 @@ function ClaimText({ reference, result, accrual }) {
     </div>
   );
 }
+
+
+// Κάνει την εφαρμογή ορατή στο index.html
+window.__App = App;
